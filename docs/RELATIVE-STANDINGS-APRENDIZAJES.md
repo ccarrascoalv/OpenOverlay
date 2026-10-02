@@ -12,7 +12,7 @@ Rama `bugs_fixes_0.8.0`. El commit `4e8aca0` ("Refactor lap time calculations an
 
 | Pieza | Fichero | Qué hace hoy |
 |---|---|---|
-| Relative | `IRacingOverlay.App/ViewModels/StandingsBuilder.cs` → `BuildRelative` | Gaps en segundos a partir de `CarIdxEstTime`, en el reloj del coche del jugador |
+| Relative | `IRacingOverlay.App/ViewModels/StandingsBuilder.cs` → `BuildRelative` | Gaps en segundos a partir de `CarIdxEstTime`, en el reloj del coche del jugador; en carrera, POS en vivo por distancia de carrera |
 | Curva de tiempos estimados | `IRacingOverlay.App/ViewModels/EstTimeProfile.cs` | Aprende en vivo `LapDistPct → EstTime` del coche del jugador |
 | Standings (carrera) | `StandingsBuilder.cs` → `BuildStandings` | Orden oficial `CarIdxPosition`; gap medido al cruzar meta; `+nL` para doblados |
 | Pasos por meta | `IRacingOverlay.App/ViewModels/LineCrossingTracker.cs` | Instante en que cada coche completa cada vuelta, interpolado entre ticks |
@@ -113,17 +113,19 @@ Nivel de confianza: **[V]** verificado (datos, código o comportamiento observad
 
 | Variable | Semántica y rarezas |
 |---|---|
-| `CarIdxLap` | Vueltas *empezadas*. **-1** = coche fuera del mundo (garaje, grúa, desconectado). Sube al cruzar la línea, también en la salida [V]. Cuenta desde el inicio de la sesión, así que en práctica o clasificación no indica "cuánto de cerca están" [V]. |
-| `CarIdxLapCompleted` | Vueltas completadas; sube al cruzar meta [D]. Valor en parrilla (0 o -1) [?]. Si no existe, el tracker usa `CarIdxLap`. |
+| `CarIdxLap` | Vueltas *empezadas*. **-1** = coche fuera del mundo (garaje, grúa, desconectado). Sube al cruzar la línea, también en la salida [V]. **Cambia en el mismo tick (60 Hz) en que el pct da la vuelta, también dentro del pit lane** [V con `Lap` del jugador, 2026-10-02 16:57]. Cuenta desde el inicio de la sesión, así que en práctica o clasificación no indica "cuánto de cerca están" [V]. |
+| `CarIdxLapCompleted` | Vueltas completadas; sube al cruzar meta, en el mismo tick que `Lap` [V jugador]. **-1 en parrilla y en la vuelta de formación; pasa a 0 al cruzar la línea con la bandera verde** [V jugador]. El tracker trata ese -1 como "fuera del mundo", así que el paso de la salida no se cronometra. Si no existe, el tracker usa `CarIdxLap`. |
 | `CarIdxLapDistPct` | 0–1 desde la línea de meta. -1 fuera del mundo [V]. En el pit lane se proyecta sobre la pista [D]. |
 | `CarIdxEstTime` | "Tiempo estimado para llegar a la posición actual" desde la línea, **en el reloj `CarClassEstLapTime` de cada coche** [V por definición]. Sigue el perfil de velocidad [D]. Es función solo de la posición [D]. Valor en el pit lane [?]. |
 | `CarClassEstLapTime` (YAML) | **Por coche, no por clase**: los modelos con BoP de una misma clase tienen valores distintos [V, 10 valores en GT3]. Disponible desde el principio [V]. |
-| `CarIdxPosition` / `CarIdxClassPosition` | Oficiales; se recalculan al cruzar meta [V por informe histórico]. Asignados en parrilla antes de la salida [V]. **0 en sesiones no puntuables** (práctica, test) [V]. Placeholders de IA en sesiones de test: posición asignada con `Lap` -1 [V]. |
+| `CarIdxPosition` / `CarIdxClassPosition` | Oficiales. Cambian cuando *cualquier* coche cruza meta (por ejemplo, coches que te adelantan en el pit lane y cruzan antes que tú), pero **con 1,3–2,3 s de retraso respecto al cruce** (el tuyo se actualizó entre pct 0,020 y 0,037 de la vuelta siguiente) [V con `PlayerCarPosition`]. **0 durante la parrilla y la vuelta de formación, hasta la bandera verde**, al menos para el jugador en una carrera offline [V]; contradice un comentario antiguo del código que decía que se asignan en parrilla. **0 en sesiones no puntuables** (práctica, test) [V]. Placeholders de IA en sesiones de test: posición asignada con `Lap` -1 [V]. |
 | `CarIdxF2Time` | "Tiempo de carrera tras el líder o vuelta más rápida". Semántica exacta para doblados y clases [?]. **No se usa.** |
 | `CarIdxLastLapTime` / `CarIdxBestLapTime` | Por eventos: -1 hasta que este cliente ve cruzar al coche. Al conectar a mitad de sesión hay que leer `ResultsPositions` del YAML [V]. Un coche aparcado en boxes puede volver a 0 [V] (para eso existe `SessionBestLapTracker`). |
 | `SessionInfo.CurrentSessionNum` | iRacing **no lo escribe**. Usar `SessionNum` de la telemetría (`CurrentSession.Number`) [V]. |
 | `SessionState` | 1 GetInCar, 2 Warmup, 3 ParadeLaps, 4 Racing, 5 Checkered, 6 CoolDown [V en el .ibt]. |
 | `CarIdxTrackSurface` | -1 = fuera del mundo (lo usa `PitStopTracker`) [V]. |
+| `CarDistAhead` / `CarDistBehind` | Solo del jugador. Metros al coche más cercano delante y detrás en pista, de cualquier clase; detrás no se pliega a media vuelta (hasta 2182 m vistos). **500000 = sin dato, y así está durante todo el paso por pit road** [V]. Están en los `.ibt`. |
+| Pit lane (Road Atlanta) | Pit road de pct 0,957 a 0,088 (~530 m). A 72 km/h son 25,3 s, frente a 8,4 s del mismo tramo en pista: cada paso sin parar cuesta ~16,9 s. El pct avanza al ritmo del coche, salvo en la entrada (0,957–0,97), donde avanza ~35 % más rápido [V]. |
 | `.ibt` | Formato de cabecera igual que la memoria compartida, a 60 Hz. **Sin arrays CarIdx.** YAML de sesión incluido [V]. |
 
 ---
@@ -215,8 +217,8 @@ Práctica y clasificación siguen ordenando por vuelta rápida (`BuildFastestLap
    - Cómo comprobarlo: en vivo, comparar contra un prototipo. Si la desviación es sistemática y proporcional, cambiar `OnPlayersClock` para leer al rival en su propio reloj, escalado o con su curva.
 3. **Modelos BoP de la misma clase:** la forma de la curva es casi idéntica [D]. Con la curva aprendida, el error debería ser despreciable.
 4. **`EstTime` depende solo de la posición** [D]; si no, la curva aprendida sería ruidosa. **Comportamiento en pit lane** [?]: por eso se ignoran esas muestras.
-5. **Sincronía en meta entre `CarIdxLap`/`LapCompleted` y `LapDistPct`** [?]. Si no cambian en el mismo tick, la interpolación cae en el instante del tick (error ≤ 100 ms), o la distancia de carrera salta una vuelta durante un tick en el cálculo de doblados.
-6. **`CarIdxLapCompleted` en parrilla y en la salida** [?]. El primer paso por meta en la salida se cronometra como vuelta "completada"; sirve para tener gaps tras la salida, pero no está verificado en vivo.
+5. ~~Sincronía en meta entre `CarIdxLap`/`LapCompleted` y `LapDistPct`~~ **Verificada** para el jugador: mismo tick, también en el pit lane. Falta confirmarlo en los arrays `CarIdx*`.
+6. **`CarIdxLapCompleted` en parrilla y en la salida:** verificado para el jugador: -1 hasta la verde y 0 tras cruzar. El paso de la salida **no** se cronometra, así que el Standings muestra "—" durante toda la vuelta 1.
 7. **Posiciones oficiales con penalizaciones o drive-through** [?]: se usan tal cual.
 
 **Para verificar con datos reales** (los `.ibt` no sirven porque no tienen arrays `CarIdx`), lo más útil sería un **grabador de diagnóstico**. Escribiría a disco, durante unos minutos y a 10 Hz:
@@ -243,6 +245,10 @@ Con eso se pueden contrastar las hipótesis 1, 2, 4, 5 y 6 sin ir de memoria.
 - [ ] `CHANGELOG.md` no actualizado (define la versión de la build y las notas de release; ver `.github/skills/changelog`).
 - [ ] Commit de la iteración 3 cuando se valide en vivo.
 - [ ] Opcional: grabador de diagnóstico (§6).
+- [x] **Posición en vivo en el Relative — hecho (sin commitear):** `LiveRaceRanks` en `StandingsBuilder`. Solo en sesiones Race con `SessionState` = 4 (en carrera); en formación, con bandera a cuadros, en práctica y en clasificación sigue la posición oficial del Standings. El Standings no cambia. Contexto: la black box de iRacing actualiza la posición del relativo al cruzar meta, igual que nosotros ahora; RaceLab la actualiza al instante. Coste: un `RaceOrder` por tick, despreciable; no afecta a gaps ni a banderas. Feedback de la prueba del 2026-10-02 (iteración 3): la mejor hasta ahora; gaps grandes solo contra otras clases y como mucho una vuelta (probablemente la curva aún sin aprender: el overlay se abrió al final de la formación); Standings con "—" en la vuelta 1 y posición oficial con 1–2 s de retraso, ambos aceptados por el usuario.
+- [ ] **Standings en parrilla y formación:** con `CarIdxPosition` = 0 y sin pasos por meta, el orden cae al orden del roster. Propuesta: desempatar por distancia en pista (orden de formación).
+- [ ] **Desfase de 1,3–2,3 s entre nuestro gap (al cruzar) y la posición oficial:** en ese intervalo, un coche que acaba de ponerse primero de su clase puede mostrar `+0.0` sin ser aún "Leader". Opciones: ordenar con nuestro propio cronometraje y usar el oficial solo como respaldo, o esperar a que cambie la posición oficial para publicar el gap.
+- [ ] **Vuelta 1 sin gaps en Standings:** se podría cronometrar el paso de -1 a 0 en la salida.
 
 ---
 
